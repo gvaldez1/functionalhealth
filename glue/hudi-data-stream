@@ -1,0 +1,58 @@
+import sys
+from pyspark.context import SparkContext
+from pyspark.sql.session import SparkSession
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from awsglue.dynamicframe import DynamicFrame
+from pyspark.sql.functions import *
+from awsglue.utils import getResolvedOptions
+from pyspark.sql.types import *
+from datetime import datetime
+from awsglue.transforms import *
+
+args = getResolvedOptions(sys.argv, ['JOB_NAME'])
+
+spark = SparkSession.builder.config('spark.serializer','org.apache.spark.serializer.KryoSerializer').config('spark.sql.hive.convertMetastoreParquet','false').getOrCreate()
+sc = spark.sparkContext
+glueContext = GlueContext(sc)
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
+
+
+#define schema e config de trip
+tripData = StructType([ StructField("vendor_id",StringType(),True), StructField("pickup_datetime",TimestampType(),True), StructField("dropoff_datetime",TimestampType(),True), StructField("passenger_count", IntegerType(), True), StructField("trip_distance", StringType(), True), StructField("pickup_longitude", StringType(), True), StructField("rate_code", StringType(), True), StructField("store_and_fwd_flag", StringType(), True), StructField("dropoff_longitude", StringType(), True), StructField("payment_type", StringType(), True), StructField("fare_amount", StringType(), True), StructField("surcharge", IntegerType(), True),  StructField("tip_amount", IntegerType(), True),  StructField("tolls_amount", IntegerType(), True),  StructField("total_amount", IntegerType(), True)])
+tripcommonConfig = {'className' : 'org.apache.hudi', 'hoodie.datasource.hive_sync.use_jdbc':'false',  'hoodie.datasource.write.hive_style_partitioning': 'true','hoodie.parquet.compression.codec': 'snappy', 'hoodie.table.name': 'taxi_trips', 'hoodie.consistency.check.enabled': 'false', 'hoodie.datasource.hive_sync.database': 'default', 'hoodie.datasource.hive_sync.table': 'taxi_trips', 'hoodie.datasource.hive_sync.enable': 'true', 'path': 's3://gv/transformation-zone/trips'}
+
+#define schema e config de vendor   
+vendorData = StructType([ StructField("vendor_id",StringType(),True), StructField("name",StringType(),True), StructField("address",StringType(),True), StructField("city", StringType(), True), StructField("state", StringType(), True), StructField("zip", IntegerType(), True), StructField("country", StringType(), True), StructField("contact", StringType(), True), StructField("current", StringType(), True)])
+vendorcommonConfig = {'className' : 'org.apache.hudi', 'hoodie.datasource.hive_sync.use_jdbc':'false', 'hoodie.datasource.write.partitionpath.field': 'country', 'hoodie.datasource.write.hive_style_partitioning': 'true','hoodie.parquet.compression.codec': 'snappy','hoodie.table.name': 'vendors', 'hoodie.consistency.check.enabled': 'false', 'hoodie.datasource.hive_sync.database': 'default', 'hoodie.datasource.hive_sync.table': 'vendors', 'hoodie.datasource.hive_sync.enable': 'true', 'path': 's3://gv/transformation-zone/vendors'}
+
+#define schema e config de payment
+paymentData = StructType([ StructField("payment_type",StringType(),True), StructField("payment_lookup",StringType(),True)])
+paymentcommonConfig = {'className' : 'org.apache.hudi', 'hoodie.datasource.hive_sync.use_jdbc':'false', 'hoodie.parquet.compression.codec': 'snappy', 'hoodie.datasource.write.recordkey.field': 'payment_type', 'hoodie.table.name': 'payments', 'hoodie.consistency.check.enabled': 'false', 'hoodie.datasource.hive_sync.database': 'default', 'hoodie.datasource.hive_sync.table': 'payments', 'hoodie.datasource.hive_sync.enable': 'true', 'path': 's3://gv/transformation-zone/payments'}
+
+#configuraoes gerais
+unpartitionDataConfig = {'hoodie.datasource.hive_sync.partition_extractor_class': 'org.apache.hudi.hive.NonPartitionedExtractor', 'hoodie.datasource.write.keygenerator.class': 'org.apache.hudi.keygen.NonpartitionedKeyGenerator'}
+incrementalConfig = {'hoodie.upsert.shuffle.parallelism': 68, 'hoodie.datasource.write.operation': 'upsert', 'hoodie.cleaner.policy': 'KEEP_LATEST_COMMITS', 'hoodie.cleaner.commits.retained': 10}
+
+tripcombinedConf = {**tripcommonConfig, **unpartitionDataConfig, **incrementalConfig}
+vendorcombinedConf = {**vendorcommonConfig, **unpartitionDataConfig, **incrementalConfig}
+paymentcombinedConf = {**paymentcommonConfig, **unpartitionDataConfig, **incrementalConfig}
+
+
+#unifica dados + schema
+tripDf = spark.read.schema(tripData).option("header", "true").json("s3://gv/landing-zone/*.json")
+vendorDf = spark.read.schema(tripData).option("header", "true").csv("s3://gv/landing-zone/data-vendor_lookup-csv.csv")
+paymentDf = spark.read.schema(tripData).option("header", "true").csv("s3://gv/landing-zone/data-payment_lookup-csv.csv")
+
+
+#grava o inputDF com as configurações acima
+glueContext.write_dynamic_frame.from_options(frame = DynamicFrame.fromDF(tripDf, glueContext, "tripDf"), connection_type = "marketplace.spark", connection_options = tripcombinedConf)
+
+#grava o inputDF com as configurações acima
+glueContext.write_dynamic_frame.from_options(frame = DynamicFrame.fromDF(vendorDf, glueContext, "vendorDf"), connection_type = "marketplace.spark", connection_options = vendorcombinedConf)
+
+#grava o inputDF com as configurações acima
+glueContext.write_dynamic_frame.from_options(frame = DynamicFrame.fromDF(paymentDf, glueContext, "paymentDf"), connection_type = "marketplace.spark", connection_options = paymentcombinedConf)
+
+
